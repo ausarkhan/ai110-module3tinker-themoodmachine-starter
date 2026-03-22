@@ -10,6 +10,7 @@ This class starts with very simple logic:
 """
 
 from typing import List, Dict, Tuple, Optional
+import re
 
 from dataset import POSITIVE_WORDS, NEGATIVE_WORDS
 
@@ -32,6 +33,23 @@ class MoodAnalyzer:
         self.positive_words = set(w.lower() for w in positive_words)
         self.negative_words = set(w.lower() for w in negative_words)
 
+        # Easy-to-adjust thresholds for mapping scores to labels.
+        self.positive_threshold = 1
+        self.negative_threshold = -1
+
+        # Simple negation cues used to flip the next sentiment word.
+        self.negation_words = {
+          "not",
+          "never",
+          "no",
+          "dont",
+          "cant",
+          "cannot",
+          "isnt",
+          "wasnt",
+          "wont",
+        }
+
     # ---------------------------------------------------------------------
     # Preprocessing
     # ---------------------------------------------------------------------
@@ -53,7 +71,12 @@ class MoodAnalyzer:
           - Normalize repeated characters ("soooo" -> "soo")
         """
         cleaned = text.strip().lower()
-        tokens = cleaned.split()
+
+        # Remove simple punctuation while keeping words and emojis.
+        cleaned = re.sub(r"[.,!?;:\"'()\[\]{}]", " ", cleaned)
+
+        # Split on whitespace and drop empty chunks.
+        tokens = [token for token in cleaned.split() if token]
 
         return tokens
 
@@ -75,15 +98,29 @@ class MoodAnalyzer:
           - Give some words higher weights than others (for example "hate" < "annoyed")
           - Treat emojis or slang (":)", "lol", "💀") as strong signals
         """
-        # TODO: Implement this method.
-        #   1. Call self.preprocess(text) to get tokens.
-        #   2. Loop over the tokens.
-        #   3. Increase the score for positive words, decrease for negative words.
-        #   4. Return the total score.
-        #
-        # Hint: if you implement negation, you may want to look at pairs of tokens,
-        # like ("not", "happy") or ("never", "fun").
-        pass
+        tokens = self.preprocess(text)
+        score = 0
+        negate_next = False
+
+        for token in tokens:
+          if token in self.negation_words:
+            negate_next = True
+            continue
+
+          if token in self.positive_words:
+            score += -1 if negate_next else 1
+            negate_next = False
+            continue
+
+          if token in self.negative_words:
+            score += 1 if negate_next else -1
+            negate_next = False
+            continue
+
+          # Reset negation if the next token is not sentiment-bearing.
+          negate_next = False
+
+        return score
 
     # ---------------------------------------------------------------------
     # Label prediction
@@ -105,12 +142,23 @@ class MoodAnalyzer:
         Just remember that whatever labels you return should match the labels
         you use in TRUE_LABELS in dataset.py if you care about accuracy.
         """
-        # TODO: Implement this method.
-        #   1. Call self.score_text(text) to get the numeric score.
-        #   2. Return "positive" if the score is above 0.
-        #   3. Return "negative" if the score is below 0.
-        #   4. Return "neutral" otherwise.
-        pass
+        tokens = self.preprocess(text)
+        score = self.score_text(text)
+
+        # If both positive and negative cues appear, call it mixed.
+        has_positive = any(token in self.positive_words for token in tokens)
+        has_negative = any(token in self.negative_words for token in tokens)
+        has_contrast = any(token in {"but", "however"} for token in tokens)
+        if (has_positive and has_negative) or (has_contrast and score != 0):
+          return "mixed"
+
+        if score >= self.positive_threshold:
+          return "positive"
+        if score <= self.negative_threshold:
+          return "negative"
+        if score == 0:
+          return "neutral"
+        return "mixed"
 
     # ---------------------------------------------------------------------
     # Explanations (optional but recommended)

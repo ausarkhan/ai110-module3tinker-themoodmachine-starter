@@ -8,6 +8,16 @@ from mood_analyzer import MoodAnalyzer
 from dataset import SAMPLE_POSTS, TRUE_LABELS
 
 
+STRESS_TEST_POSTS = [
+    "Yeah great, another 8am meeting... love that for me",
+    "That game was sick",
+    "I am happy but also exhausted",
+    "😂😂😂",
+    "I love waiting in traffic for 2 hours",
+    "Not bad actually",
+]
+
+
 def evaluate_rule_based(posts: List[str], labels: List[str]) -> float:
     """
     Evaluate the rule based MoodAnalyzer on a labeled dataset.
@@ -58,6 +68,21 @@ def run_batch_demo() -> None:
         print(f'"{text}" -> {label}')
 
 
+def run_stress_tests() -> None:
+    """
+    Run handpicked edge cases to reveal model failure patterns.
+    """
+    analyzer = MoodAnalyzer()
+    print("\n=== Stress Test (rule based) ===")
+    for text in STRESS_TEST_POSTS:
+        label = analyzer.predict_label(text)
+        score = analyzer.score_text(text)
+        print(f'"{text}" -> predicted={label}, score={score}')
+
+    print("\nObserved failure pattern:")
+    print("- Sarcasm often looks positive because of words like 'great' or 'love'.")
+
+
 def run_interactive_loop() -> None:
     """
     Let the user type their own sentences and see the predicted mood.
@@ -86,6 +111,7 @@ if __name__ == "__main__":
     evaluate_rule_based(SAMPLE_POSTS, TRUE_LABELS)
 
     run_batch_demo()
+    run_stress_tests()
 
     run_interactive_loop()
 

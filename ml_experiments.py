@@ -16,6 +16,16 @@ from sklearn.metrics import accuracy_score
 from dataset import SAMPLE_POSTS, TRUE_LABELS
 
 
+STRESS_TEST_POSTS = [
+    "Yeah great, another 8am meeting... love that for me",
+    "That game was sick",
+    "I am happy but also exhausted",
+    "😂😂😂",
+    "I love waiting in traffic for 2 hours",
+    "Not bad actually",
+]
+
+
 def train_ml_model(
     texts: List[str],
     labels: List[str],
@@ -121,6 +131,19 @@ def run_interactive_loop(
         print(f"ML model: {label}")
 
 
+def run_stress_tests(
+    vectorizer: CountVectorizer,
+    model: LogisticRegression,
+) -> None:
+    """
+    Run the same stress-test posts used in main.py for comparison.
+    """
+    print("\n=== Stress Test (ML model) ===")
+    for text in STRESS_TEST_POSTS:
+        label = predict_single_text(text, vectorizer, model)
+        print(f'"{text}" -> predicted={label}')
+
+
 if __name__ == "__main__":
     print("Training an ML model on SAMPLE_POSTS and TRUE_LABELS from dataset.py...")
     print("Make sure you have added enough labeled examples before running this.\n")
@@ -130,6 +153,9 @@ if __name__ == "__main__":
 
     # Evaluate on the same dataset (training accuracy).
     evaluate_on_dataset(SAMPLE_POSTS, TRUE_LABELS, vectorizer, model)
+
+    # Compare behavior on hard edge cases.
+    run_stress_tests(vectorizer, model)
 
     # Let the user try their own examples.
     run_interactive_loop(vectorizer, model)
