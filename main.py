@@ -1,11 +1,9 @@
-"""
-Entry point for the Mood Machine rule based mood analyzer.
-"""
+"""Entry point for the hybrid Mood Machine system."""
 
-from typing import List
+from typing import Dict, List
 
-from mood_analyzer import MoodAnalyzer
 from dataset import SAMPLE_POSTS, TRUE_LABELS
+from mood_analyzer import MoodAnalyzer
 
 
 STRESS_TEST_POSTS = [
@@ -18,79 +16,82 @@ STRESS_TEST_POSTS = [
 ]
 
 
-def evaluate_rule_based(posts: List[str], labels: List[str]) -> float:
-    """
-    Evaluate the rule based MoodAnalyzer on a labeled dataset.
-
-    Prints each text with its predicted label and the true label,
-    then returns the overall accuracy as a float between 0 and 1.
-    """
-    analyzer = MoodAnalyzer()
+def evaluate_system(posts: List[str], labels: List[str]) -> Dict[str, float]:
+    """Evaluate the hybrid system and return reliability metrics."""
+    analyzer = MoodAnalyzer(use_ml=True)
     correct = 0
     total = len(posts)
+    uncertain_count = 0
+    confidence_sum = 0.0
 
-    print("=== Rule Based Evaluation on SAMPLE_POSTS ===")
+    print("=== Hybrid System Evaluation on SAMPLE_POSTS ===")
     for text, true_label in zip(posts, labels):
-        predicted_label = analyzer.predict_label(text)
+        result = analyzer.analyze(text)
+        predicted_label = result["label"]
+        confidence = float(result["confidence"])
+        confidence_sum += confidence
+        if predicted_label == "uncertain":
+            uncertain_count += 1
+
         is_correct = predicted_label == true_label
         if is_correct:
             correct += 1
 
-        # If you implement explain(), you can uncomment these lines:
-        # reason = analyzer.explain(text)
-        # print(f'"{text}" -> predicted={predicted_label}, true={true_label} ({reason})')
-
-        print(f'"{text}" -> predicted={predicted_label}, true={true_label}')
+        print(
+            f'"{text}" -> predicted={predicted_label}, true={true_label}, '
+            f"conf={confidence:.2f}, agreement={result['agreement']}"
+        )
 
     if total == 0:
         print("\nNo labeled examples to evaluate.")
-        return 0.0
+        return {"accuracy": 0.0, "avg_confidence": 0.0, "uncertain_rate": 0.0}
 
     accuracy = correct / total
-    print(f"\nRule based accuracy on SAMPLE_POSTS: {accuracy:.2f}")
-    return accuracy
+    avg_confidence = confidence_sum / total
+    uncertain_rate = uncertain_count / total
+
+    print(f"\nAccuracy on SAMPLE_POSTS: {accuracy:.2f}")
+    print(f"Average confidence: {avg_confidence:.2f}")
+    print(f"Uncertain predictions: {uncertain_count}/{total} ({uncertain_rate:.2f})")
+
+    return {
+        "accuracy": accuracy,
+        "avg_confidence": avg_confidence,
+        "uncertain_rate": uncertain_rate,
+    }
 
 
 def run_batch_demo() -> None:
-    """
-    Run the MoodAnalyzer on the sample posts and print predictions only.
-
-    This is a quick way to see how your rules behave without comparing
-    to the true labels.
-    """
-    analyzer = MoodAnalyzer()
-    print("\n=== Batch Demo on SAMPLE_POSTS (rule based) ===")
+    """Run the hybrid MoodAnalyzer on sample posts."""
+    analyzer = MoodAnalyzer(use_ml=True)
+    print("\n=== Batch Demo on SAMPLE_POSTS (hybrid) ===")
     for text in SAMPLE_POSTS:
-        label = analyzer.predict_label(text)
-        # If explain() is implemented, show a short explanation.
-        # reason = analyzer.explain(text)
-        # print(f'"{text}" -> {label} ({reason})')
-        print(f'"{text}" -> {label}')
+        result = analyzer.analyze(text)
+        print(
+            f'"{text}" -> {result["label"]} '
+            f"(conf={result['confidence']:.2f}, reason={result['reason']})"
+        )
 
 
 def run_stress_tests() -> None:
-    """
-    Run handpicked edge cases to reveal model failure patterns.
-    """
-    analyzer = MoodAnalyzer()
-    print("\n=== Stress Test (rule based) ===")
+    """Run handpicked edge cases to reveal reliability behavior."""
+    analyzer = MoodAnalyzer(use_ml=True)
+    print("\n=== Stress Test (hybrid) ===")
     for text in STRESS_TEST_POSTS:
-        label = analyzer.predict_label(text)
-        score = analyzer.score_text(text)
-        print(f'"{text}" -> predicted={label}, score={score}')
+        result = analyzer.analyze(text)
+        print(
+            f'"{text}" -> predicted={result["label"]}, '
+            f"conf={result['confidence']:.2f}, agreement={result['agreement']}"
+        )
 
-    print("\nObserved failure pattern:")
-    print("- Sarcasm often looks positive because of words like 'great' or 'love'.")
+    print("\nObserved reliability pattern:")
+    print("- Sarcasm is often routed to uncertain when rule and ML disagree.")
 
 
 def run_interactive_loop() -> None:
-    """
-    Let the user type their own sentences and see the predicted mood.
-
-    Type 'quit' or press Enter on an empty line to exit.
-    """
-    analyzer = MoodAnalyzer()
-    print("\n=== Interactive Mood Machine (rule based) ===")
+    """Interactive loop for the hybrid mood system."""
+    analyzer = MoodAnalyzer(use_ml=True)
+    print("\n=== Interactive Mood Machine (hybrid) ===")
     print("Type a sentence to analyze its mood.")
     print("Type 'quit' or press Enter on an empty line to exit.\n")
 
@@ -100,21 +101,24 @@ def run_interactive_loop() -> None:
             print("Goodbye from the Mood Machine.")
             break
 
-        label = analyzer.predict_label(user_input)
-        # If explain() is implemented, you can include an explanation:
-        # reason = analyzer.explain(user_input)
-        # print(f"Model: {label} ({reason})")
-        print(f"Model: {label}")
+        result = analyzer.analyze(user_input)
+        print(
+            f"Model: {result['label']} "
+            f"(conf={result['confidence']:.2f}, reason={result['reason']})"
+        )
 
 
 if __name__ == "__main__":
-    evaluate_rule_based(SAMPLE_POSTS, TRUE_LABELS)
+    metrics = evaluate_system(SAMPLE_POSTS, TRUE_LABELS)
 
     run_batch_demo()
     run_stress_tests()
 
     run_interactive_loop()
 
-    print("\nTip: After you explore the rule based model here,")
-    print("run `python ml_experiments.py` to try a simple ML based model")
-    print("trained on the same SAMPLE_POSTS and TRUE_LABELS.")
+    print("\nSystem summary:")
+    print(
+        f"accuracy={metrics['accuracy']:.2f}, "
+        f"avg_confidence={metrics['avg_confidence']:.2f}, "
+        f"uncertain_rate={metrics['uncertain_rate']:.2f}"
+    )

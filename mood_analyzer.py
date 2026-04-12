@@ -1,201 +1,255 @@
-# mood_analyzer.py
 """
-Rule based mood analyzer for short text snippets.
+Hybrid mood analyzer with reliability signals.
 
-This class starts with very simple logic:
-  - Preprocess the text
-  - Look for positive and negative words
-  - Compute a numeric score
-  - Convert that score into a mood label
+Pipeline:
+  input -> preprocessing -> rule score + ML score -> confidence routing -> output
 """
 
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional
+import logging
 import re
 
-from dataset import POSITIVE_WORDS, NEGATIVE_WORDS
+from dataset import NEGATIVE_WORDS, POSITIVE_WORDS, SAMPLE_POSTS, TRUE_LABELS
+
+try:
+  from sklearn.feature_extraction.text import CountVectorizer
+  from sklearn.linear_model import LogisticRegression
+except Exception:  # pragma: no cover - fallback for missing optional dependency
+  CountVectorizer = None
+  LogisticRegression = None
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MoodAnalyzer:
-    """
-    A very simple, rule based mood classifier.
-    """
+  """A hybrid mood classifier that combines rule-based and ML predictions."""
 
-    def __init__(
-        self,
-        positive_words: Optional[List[str]] = None,
-        negative_words: Optional[List[str]] = None,
-    ) -> None:
-        # Use the default lists from dataset.py if none are provided.
-        positive_words = positive_words if positive_words is not None else POSITIVE_WORDS
-        negative_words = negative_words if negative_words is not None else NEGATIVE_WORDS
+  def __init__(
+    self,
+    positive_words: Optional[List[str]] = None,
+    negative_words: Optional[List[str]] = None,
+    use_ml: bool = True,
+    uncertainty_threshold: float = 0.55,
+    high_confidence_threshold: float = 0.75,
+  ) -> None:
+    positive_words = positive_words if positive_words is not None else POSITIVE_WORDS
+    negative_words = negative_words if negative_words is not None else NEGATIVE_WORDS
 
-        # Store as sets for faster lookup.
-        self.positive_words = set(w.lower() for w in positive_words)
-        self.negative_words = set(w.lower() for w in negative_words)
+    self.positive_words = set(w.lower() for w in positive_words)
+    self.negative_words = set(w.lower() for w in negative_words)
+    self.negation_words = {
+      "not",
+      "never",
+      "no",
+      "dont",
+      "can't",
+      "cant",
+      "cannot",
+      "isn't",
+      "isnt",
+      "wasn't",
+      "wasnt",
+      "won't",
+      "wont",
+    }
+    self.contrast_words = {"but", "however", "though", "yet"}
 
-        # Easy-to-adjust thresholds for mapping scores to labels.
-        self.positive_threshold = 1
-        self.negative_threshold = -1
+    self.positive_threshold = 1
+    self.negative_threshold = -1
+    self.uncertainty_threshold = uncertainty_threshold
+    self.high_confidence_threshold = high_confidence_threshold
 
-        # Simple negation cues used to flip the next sentiment word.
-        self.negation_words = {
-          "not",
-          "never",
-          "no",
-          "dont",
-          "cant",
-          "cannot",
-          "isnt",
-          "wasnt",
-          "wont",
-        }
+    self.vectorizer = None
+    self.model = None
+    self.ml_enabled = False
 
-    # ---------------------------------------------------------------------
-    # Preprocessing
-    # ---------------------------------------------------------------------
+    if use_ml and CountVectorizer is not None and LogisticRegression is not None:
+      self._train_ml_backend(SAMPLE_POSTS, TRUE_LABELS)
 
-    def preprocess(self, text: str) -> List[str]:
-        """
-        Convert raw text into a list of tokens the model can work with.
+  def _train_ml_backend(self, texts: List[str], labels: List[str]) -> None:
+    if len(texts) != len(labels) or not texts:
+      LOGGER.warning("ML backend disabled due to invalid training data.")
+      self.ml_enabled = False
+      return
 
-        TODO: Improve this method.
+    self.vectorizer = CountVectorizer(ngram_range=(1, 2), min_df=1)
+    X = self.vectorizer.fit_transform(texts)
+    self.model = LogisticRegression(max_iter=1000, multi_class="auto")
+    self.model.fit(X, labels)
+    self.ml_enabled = True
 
-        Right now, it does the minimum:
-          - Strips leading and trailing whitespace
-          - Converts everything to lowercase
-          - Splits on spaces
+  def preprocess(self, text: str) -> List[str]:
+    cleaned = text.strip().lower()
+    cleaned = re.sub(r"[.,!?;:\"'()\[\]{}]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return [token for token in cleaned.split(" ") if token]
 
-        Ideas to improve:
-          - Remove punctuation
-          - Handle simple emojis separately (":)", ":-(", "🥲", "😂")
-          - Normalize repeated characters ("soooo" -> "soo")
-        """
-        cleaned = text.strip().lower()
+  def _rule_analysis(self, text: str) -> Dict[str, Any]:
+    tokens = self.preprocess(text)
+    if not tokens:
+      return {
+        "label": "uncertain",
+        "confidence": 0.0,
+        "score": 0,
+        "positive_hits": [],
+        "negative_hits": [],
+        "tokens": [],
+      }
 
-        # Remove simple punctuation while keeping words and emojis.
-        cleaned = re.sub(r"[.,!?;:\"'()\[\]{}]", " ", cleaned)
+    score = 0
+    negate_next = False
+    positive_hits: List[str] = []
+    negative_hits: List[str] = []
 
-        # Split on whitespace and drop empty chunks.
-        tokens = [token for token in cleaned.split() if token]
+    for token in tokens:
+      if token in self.negation_words:
+        negate_next = True
+        continue
 
-        return tokens
-
-    # ---------------------------------------------------------------------
-    # Scoring logic
-    # ---------------------------------------------------------------------
-
-    def score_text(self, text: str) -> int:
-        """
-        Compute a numeric "mood score" for the given text.
-
-        Positive words increase the score.
-        Negative words decrease the score.
-
-        TODO: You must choose AT LEAST ONE modeling improvement to implement.
-        For example:
-          - Handle simple negation such as "not happy" or "not bad"
-          - Count how many times each word appears instead of just presence
-          - Give some words higher weights than others (for example "hate" < "annoyed")
-          - Treat emojis or slang (":)", "lol", "💀") as strong signals
-        """
-        tokens = self.preprocess(text)
-        score = 0
+      if token in self.positive_words:
+        applied = -1 if negate_next else 1
+        score += applied
+        if applied > 0:
+          positive_hits.append(token)
+        else:
+          negative_hits.append(f"not_{token}")
         negate_next = False
+        continue
 
-        for token in tokens:
-          if token in self.negation_words:
-            negate_next = True
-            continue
+      if token in self.negative_words:
+        applied = 1 if negate_next else -1
+        score += applied
+        if applied < 0:
+          negative_hits.append(token)
+        else:
+          positive_hits.append(f"not_{token}")
+        negate_next = False
+        continue
 
-          if token in self.positive_words:
-            score += -1 if negate_next else 1
-            negate_next = False
-            continue
+      negate_next = False
 
-          if token in self.negative_words:
-            score += 1 if negate_next else -1
-            negate_next = False
-            continue
+    has_positive = bool(positive_hits)
+    has_negative = bool(negative_hits)
+    has_contrast = any(token in self.contrast_words for token in tokens)
 
-          # Reset negation if the next token is not sentiment-bearing.
-          negate_next = False
+    if (has_positive and has_negative) or (has_contrast and score != 0):
+      label = "mixed"
+    elif score >= self.positive_threshold:
+      label = "positive"
+    elif score <= self.negative_threshold:
+      label = "negative"
+    else:
+      label = "neutral"
 
-        return score
+    evidence_hits = len(positive_hits) + len(negative_hits)
+    confidence = min(0.95, 0.45 + (0.18 * abs(score)) + (0.07 * evidence_hits))
+    if label == "mixed":
+      confidence = max(confidence, 0.65)
+    if label == "neutral" and evidence_hits == 0:
+      confidence = 0.5
 
-    # ---------------------------------------------------------------------
-    # Label prediction
-    # ---------------------------------------------------------------------
+    return {
+      "label": label,
+      "confidence": round(confidence, 2),
+      "score": score,
+      "positive_hits": positive_hits,
+      "negative_hits": negative_hits,
+      "tokens": tokens,
+    }
 
-    def predict_label(self, text: str) -> str:
-        """
-        Turn the numeric score for a piece of text into a mood label.
+  def score_text(self, text: str) -> int:
+    """Return the rule-based sentiment score for compatibility."""
+    return int(self._rule_analysis(text)["score"])
 
-        The default mapping is:
-          - score > 0  -> "positive"
-          - score < 0  -> "negative"
-          - score == 0 -> "neutral"
+  def _ml_analysis(self, text: str) -> Optional[Dict[str, Any]]:
+    if not self.ml_enabled or self.vectorizer is None or self.model is None:
+      return None
 
-        TODO: You can adjust this mapping if it makes sense for your model.
-        For example:
-          - Use different thresholds (for example score >= 2 to be "positive")
-          - Add a "mixed" label for scores close to zero
-        Just remember that whatever labels you return should match the labels
-        you use in TRUE_LABELS in dataset.py if you care about accuracy.
-        """
-        tokens = self.preprocess(text)
-        score = self.score_text(text)
+    X = self.vectorizer.transform([text])
+    label = self.model.predict(X)[0]
+    probabilities = self.model.predict_proba(X)[0]
+    confidence = float(max(probabilities))
+    return {
+      "label": str(label),
+      "confidence": round(confidence, 2),
+    }
 
-        # If both positive and negative cues appear, call it mixed.
-        has_positive = any(token in self.positive_words for token in tokens)
-        has_negative = any(token in self.negative_words for token in tokens)
-        has_contrast = any(token in {"but", "however"} for token in tokens)
-        if (has_positive and has_negative) or (has_contrast and score != 0):
-          return "mixed"
+  def analyze(self, text: str) -> Dict[str, Any]:
+    """Run the full hybrid pipeline and return structured output."""
+    if not isinstance(text, str):
+      raise TypeError("Input text must be a string.")
 
-        if score >= self.positive_threshold:
-          return "positive"
-        if score <= self.negative_threshold:
-          return "negative"
-        if score == 0:
-          return "neutral"
-        return "mixed"
+    if not text.strip():
+      LOGGER.warning("Empty input detected; returning uncertain result.")
+      return {
+        "label": "uncertain",
+        "confidence": 0.0,
+        "reason": "Empty input.",
+        "rule": self._rule_analysis(text),
+        "ml": None,
+        "agreement": None,
+      }
 
-    # ---------------------------------------------------------------------
-    # Explanations (optional but recommended)
-    # ---------------------------------------------------------------------
+    rule_result = self._rule_analysis(text)
+    ml_result = self._ml_analysis(text)
 
-    def explain(self, text: str) -> str:
-        """
-        Return a short string explaining WHY the model chose its label.
+    if ml_result is None:
+      if rule_result["confidence"] < self.uncertainty_threshold:
+        final_label = "uncertain"
+        reason = "Rule confidence below threshold."
+      else:
+        final_label = rule_result["label"]
+        reason = "Rule-only prediction."
+      return {
+        "label": final_label,
+        "confidence": rule_result["confidence"],
+        "reason": reason,
+        "rule": rule_result,
+        "ml": None,
+        "agreement": None,
+      }
 
-        TODO:
-          - Look at the tokens and identify which ones counted as positive
-            and which ones counted as negative.
-          - Show the final score.
-          - Return a short human readable explanation.
+    agreement = rule_result["label"] == ml_result["label"]
+    if agreement:
+      final_label = rule_result["label"]
+      final_confidence = round((rule_result["confidence"] + ml_result["confidence"]) / 2.0, 2)
+      reason = "Rule and ML agree."
+    else:
+      if max(rule_result["confidence"], ml_result["confidence"]) >= self.high_confidence_threshold:
+        if ml_result["confidence"] >= rule_result["confidence"]:
+          final_label = ml_result["label"]
+          final_confidence = ml_result["confidence"]
+          reason = "Disagreement resolved in favor of higher-confidence ML signal."
+        else:
+          final_label = rule_result["label"]
+          final_confidence = rule_result["confidence"]
+          reason = "Disagreement resolved in favor of higher-confidence rule signal."
+      else:
+        final_label = "uncertain"
+        final_confidence = round((rule_result["confidence"] + ml_result["confidence"]) / 2.0, 2)
+        reason = "Rule/ML disagreement with low confidence."
 
-        Example explanation (your exact wording can be different):
-          'Score = 2 (positive words: ["love", "great"]; negative words: [])'
+    return {
+      "label": final_label,
+      "confidence": final_confidence,
+      "reason": reason,
+      "rule": rule_result,
+      "ml": ml_result,
+      "agreement": agreement,
+    }
 
-        The current implementation is a placeholder so the code runs even
-        before you implement it.
-        """
-        tokens = self.preprocess(text)
+  def predict_label(self, text: str) -> str:
+    """Compatibility wrapper used by existing scripts."""
+    return str(self.analyze(text)["label"])
 
-        positive_hits: List[str] = []
-        negative_hits: List[str] = []
-        score = 0
-
-        for token in tokens:
-            if token in self.positive_words:
-                positive_hits.append(token)
-                score += 1
-            if token in self.negative_words:
-                negative_hits.append(token)
-                score -= 1
-
-        return (
-            f"Score = {score} "
-            f"(positive: {positive_hits or '[]'}, "
-            f"negative: {negative_hits or '[]'})"
-        )
+  def explain(self, text: str) -> str:
+    result = self.analyze(text)
+    rule = result["rule"]
+    ml = result["ml"]
+    ml_part = f", ml={ml['label']}({ml['confidence']:.2f})" if ml is not None else ""
+    return (
+      f"label={result['label']} conf={result['confidence']:.2f} "
+      f"reason={result['reason']} rule={rule['label']}({rule['confidence']:.2f})"
+      f" score={rule['score']} pos={rule['positive_hits']} neg={rule['negative_hits']}{ml_part}"
+    )
